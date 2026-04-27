@@ -21,6 +21,10 @@
 - `multi_agent/nodes.py`: agent node factory
 - `multi_agent/routing.py`: routing logic
 - `multi_agent/graph.py`: StateGraph assembly
+- `db/models.py`: SQLAlchemy models for sessions, turns, and tools
+- `db/checkpointing.py`: checkpoint persistence and resume service
+- `db/serialization.py`: LangGraph state serialization/deserialization
+- `init_db.py`: startup-safe migration entrypoint
 - `run_example.py`: minimal runnable entrypoint
 
 ## Run
@@ -56,6 +60,20 @@ Request body:
   "prompt": "Design a resilient event-driven architecture for order processing.",
   "model_name": "gpt-4o-mini",
   "temperature": 0.1,
+  "timeout_seconds": 120,
+  "session_id": null,
+  "resume": false
+}
+```
+
+Resume request body example:
+
+```json
+{
+  "session_id": "4f1f7844-b94e-47b6-a5c4-7ae73fd65635",
+  "resume": true,
+  "model_name": "gpt-4o-mini",
+  "temperature": 0.1,
   "timeout_seconds": 120
 }
 ```
@@ -76,6 +94,40 @@ SSE payload format (strict JSON):
 - `tool_execution`
 - `final_answer`
 - `error`
+
+## Long-term memory (PostgreSQL)
+
+The persistence layer stores:
+
+- `sessions`: current resumable snapshot and lifecycle status
+- `agent_turns`: one durable checkpoint per completed node execution
+- `tool_executions`: tool start/end telemetry linked to session and turn
+
+Checkpointing behavior:
+
+- At the end of every agent node execution, the full LangGraph state is serialized and written to PostgreSQL.
+- `active_agent` is advanced to the next routable node, so resuming starts at the correct next agent.
+- If the stream times out or the client disconnects, the session is marked `paused` and can be resumed with `resume=true`.
+
+## Automatic migrations on startup
+
+- `api.main` runs `initialize_database()` at startup when `AUTO_MIGRATE_ON_STARTUP=true`.
+- `init_db.py` waits for PostgreSQL readiness and applies Alembic migrations under a PostgreSQL advisory lock.
+- This prevents concurrent migration races when multiple containers start together.
+
+Run migrations manually:
+
+```bash
+python backend/init_db.py
+```
+
+## Docker notes
+
+The included `docker-compose.yml` uses a named volume:
+
+- `postgres_data:/var/lib/postgresql/data`
+
+This ensures local DB state persists across machine restarts.
 
 ## Add a QA Tester later
 

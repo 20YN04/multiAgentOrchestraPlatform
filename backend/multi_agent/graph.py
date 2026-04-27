@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import cast
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
@@ -51,11 +52,27 @@ def build_execution_graph(
         raise ValueError(f"start_agent '{start_agent}' is not present in agent_specs.")
 
     graph = StateGraph(ExecutionState)
+    entrypoint = "__entrypoint__"
 
+    graph.add_node(entrypoint, lambda _state: {})
     for spec in agent_specs:
         graph.add_node(spec.name.value, make_agent_node(spec))
 
-    graph.add_edge(START, start_agent)
+    graph.add_edge(START, entrypoint)
+
+    available_names = {spec.name.value for spec in agent_specs}
+
+    def _route_from_state(state: ExecutionState) -> ActiveAgent:
+        candidate = state["active_agent"]
+        if candidate in available_names:
+            return candidate
+        return cast(ActiveAgent, start_agent)
+
+    graph.add_conditional_edges(
+        entrypoint,
+        _route_from_state,
+        {spec.name.value: spec.name.value for spec in agent_specs},
+    )
 
     router = build_router((spec.name for spec in agent_specs), progression=progression)
     route_map: dict[RouteTarget, str] = {

@@ -3,15 +3,23 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import AsyncIterator, Mapping
 from functools import lru_cache
-from typing import Any, Final
+from typing import Any, Final, cast
 
-from langchain_core.messages import BaseMessage, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    messages_from_dict,
+)
 from langgraph.graph.state import CompiledStateGraph
 
+from db.checkpointing import ConversationPersistence, PersistenceError
 from multi_agent.graph import build_two_agent_graph
-from multi_agent.state import AgentName, ExecutionState
+from multi_agent.routing import build_router
+from multi_agent.state import ActiveAgent, AgentName, ExecutionState
 
 from .models import AgentRunRequest, AgentStreamEvent
 from .sse import to_sse_data
@@ -22,6 +30,12 @@ except Exception:  # pragma: no cover - best-effort import
     APITimeoutError = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+PERSISTENCE = ConversationPersistence()
+ROUTER = build_router(
+    (AgentName.RESEARCHER, AgentName.CODER),
+    progression=(AgentName.RESEARCHER.value, AgentName.CODER.value),
+)
 
 KNOWN_AGENT_NAMES: Final[frozenset[str]] = frozenset(
     {
@@ -79,6 +93,21 @@ def _to_text(value: Any) -> str:
     return str(value)
 
 
+def _to_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _to_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_json_safe(item) for item in value]
+    if isinstance(value, BaseMessage):
+        return {
+            "type": value.type,
+            "content": _to_text(value.content),
+        }
+    return str(value)
+
+
 def _resolve_agent_name(event: Mapping[str, Any]) -> str:
     metadata = event.get("metadata")
     if isinstance(metadata, Mapping):
@@ -108,12 +137,52 @@ def _extract_streamed_token(event: Mapping[str, Any]) -> str:
     return _to_text(content)
 
 
+def _extract_run_id(event: Mapping[str, Any]) -> str:
+    run_id = event.get("run_id")
+    if isinstance(run_id, (str, int)):
+        return str(run_id)
+
+    fallback = event.get("id")
+    if isinstance(fallback, (str, int)):
+        return str(fallback)
+
+    return str(uuid.uuid4())
+
+
 def _extract_message_content(message: Any) -> str:
     if isinstance(message, BaseMessage):
         return _to_text(message.content)
     if isinstance(message, Mapping) and "content" in message:
         return _to_text(message["content"])
     return _to_text(message)
+
+
+def _coerce_messages(raw_messages: Any) -> list[BaseMessage]:
+    if not isinstance(raw_messages, list):
+        return []
+
+    parsed_messages: list[BaseMessage] = []
+    for item in raw_messages:
+        if isinstance(item, BaseMessage):
+            parsed_messages.append(item)
+            continue
+
+        if isinstance(item, Mapping):
+            if "type" in item and "data" in item:
+                try:
+                    hydrated = messages_from_dict([dict(item)])
+                    parsed_messages.extend(hydrated)
+                    continue
+                except Exception:
+                    pass
+
+            if "content" in item:
+                parsed_messages.append(AIMessage(content=_to_text(item["content"])))
+                continue
+
+        parsed_messages.append(AIMessage(content=_to_text(item)))
+
+    return parsed_messages
 
 
 def _strip_routing_directive(text: str) -> str:
@@ -149,6 +218,62 @@ def _extract_agent_output_candidate(
     return None
 
 
+def _extract_agent_output_update(
+    event: Mapping[str, Any],
+) -> tuple[str, Mapping[str, Any]] | None:
+    agent_name = _resolve_agent_name(event)
+    if agent_name not in KNOWN_AGENT_NAMES:
+        return None
+
+    data = event.get("data")
+    if not isinstance(data, Mapping):
+        return None
+
+    output = data.get("output")
+    if isinstance(output, Mapping):
+        return (agent_name, output)
+
+    return None
+
+
+def _apply_node_output_to_state(
+    state: ExecutionState,
+    *,
+    agent_name: str,
+    output_update: Mapping[str, Any],
+) -> tuple[ExecutionState, str | None, str]:
+    merged_state: ExecutionState = {
+        "messages": list(state["messages"]),
+        "active_agent": cast(ActiveAgent, agent_name),
+    }
+
+    new_messages = _coerce_messages(output_update.get("messages"))
+    if new_messages:
+        merged_state["messages"].extend(new_messages)
+
+    raw_output_text = ""
+    if new_messages:
+        raw_output_text = _extract_message_content(new_messages[-1])
+    elif "content" in output_update:
+        raw_output_text = _to_text(output_update.get("content"))
+
+    output_content = _strip_routing_directive(raw_output_text)
+
+    route_target = ROUTER(merged_state)
+    if route_target == "FINISHED":
+        return merged_state, None, output_content
+
+    merged_state["active_agent"] = cast(ActiveAgent, route_target)
+    return merged_state, route_target, output_content
+
+
+def _build_initial_state(prompt: str) -> ExecutionState:
+    return {
+        "messages": [HumanMessage(content=prompt)],
+        "active_agent": AgentName.RESEARCHER.value,
+    }
+
+
 def _tool_event_content(event: Mapping[str, Any]) -> str:
     event_name = str(event.get("event", ""))
     tool_name = str(event.get("name", "tool"))
@@ -177,16 +302,51 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
         timeout_seconds=round(request.timeout_seconds, 2),
     )
 
-    initial_state: ExecutionState = {
-        "messages": [HumanMessage(content=request.prompt)],
-        "active_agent": AgentName.RESEARCHER.value,
-    }
+    prompt = request.prompt.strip() if isinstance(request.prompt, str) else ""
+    initial_state = _build_initial_state(prompt)
+    requested_session_id = (
+        str(request.session_id) if request.session_id is not None else None
+    )
 
+    try:
+        bootstrap = PERSISTENCE.bootstrap_session(
+            model_name=request.model_name,
+            prompt=prompt if prompt else None,
+            initial_state=initial_state,
+            resume=request.resume,
+            requested_session_id=requested_session_id,
+        )
+    except PersistenceError as exc:
+        logger.warning("Session bootstrap failed: %s", exc)
+        yield to_sse_data(
+            AgentStreamEvent(
+                agent_name="system",
+                event_type="error",
+                content=str(exc),
+            )
+        )
+        return
+
+    session_id = str(bootstrap.session_id)
+    runtime_state = bootstrap.state
+    turn_index = bootstrap.next_turn_index
     final_answer: tuple[str, str] | None = None
+
+    yield to_sse_data(
+        AgentStreamEvent(
+            agent_name="system",
+            event_type="thought",
+            content=(
+                f"SESSION_ID: {session_id} (resumed)"
+                if bootstrap.resumed
+                else f"SESSION_ID: {session_id}"
+            ),
+        )
+    )
 
     try:
         async with asyncio.timeout(request.timeout_seconds):
-            async for event in graph.astream_events(initial_state, version="v2"):
+            async for event in graph.astream_events(runtime_state, version="v2"):
                 event_name = str(event.get("event", ""))
 
                 if event_name == "on_chat_model_stream":
@@ -201,7 +361,49 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                         )
                     continue
 
-                if event_name in {"on_tool_start", "on_tool_end"}:
+                if event_name == "on_tool_start":
+                    run_id = _extract_run_id(event)
+                    data = event.get("data")
+                    input_payload = (
+                        {"input": _to_json_safe(data.get("input"))}
+                        if isinstance(data, Mapping)
+                        else None
+                    )
+
+                    PERSISTENCE.record_tool_start(
+                        session_id=session_id,
+                        run_id=run_id,
+                        turn_index=turn_index,
+                        agent_name=_resolve_agent_name(event),
+                        tool_name=str(event.get("name", "tool")),
+                        input_payload=cast(dict[str, Any] | None, input_payload),
+                    )
+
+                    yield to_sse_data(
+                        AgentStreamEvent(
+                            agent_name=_resolve_agent_name(event),
+                            event_type="tool_execution",
+                            content=_tool_event_content(event),
+                        )
+                    )
+                    continue
+
+                if event_name == "on_tool_end":
+                    run_id = _extract_run_id(event)
+                    data = event.get("data")
+                    output_payload = (
+                        {"output": _to_json_safe(data.get("output"))}
+                        if isinstance(data, Mapping)
+                        else None
+                    )
+
+                    PERSISTENCE.record_tool_end(
+                        session_id=session_id,
+                        run_id=run_id,
+                        output_payload=cast(dict[str, Any] | None, output_payload),
+                        error_message=None,
+                    )
+
                     yield to_sse_data(
                         AgentStreamEvent(
                             agent_name=_resolve_agent_name(event),
@@ -212,9 +414,41 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                     continue
 
                 if event_name == "on_chain_end":
+                    update_candidate = _extract_agent_output_update(event)
+                    if update_candidate is not None:
+                        agent_name, output_update = update_candidate
+                        runtime_state, next_agent, output_content = (
+                            _apply_node_output_to_state(
+                                runtime_state,
+                                agent_name=agent_name,
+                                output_update=output_update,
+                            )
+                        )
+
+                        persisted_output = output_content or _strip_routing_directive(
+                            _to_text(output_update)
+                        )
+                        PERSISTENCE.save_turn_checkpoint(
+                            session_id=session_id,
+                            turn_index=turn_index,
+                            agent_name=agent_name,
+                            output_content=persisted_output,
+                            next_agent=next_agent,
+                            state=runtime_state,
+                        )
+
+                        if persisted_output:
+                            final_answer = (agent_name, persisted_output)
+                        turn_index += 1
+                        continue
+
                     candidate = _extract_agent_output_candidate(event)
                     if candidate is not None:
                         final_answer = candidate
+
+        PERSISTENCE.mark_session_completed(
+            session_id=session_id, final_state=runtime_state
+        )
 
         if final_answer is not None:
             yield to_sse_data(
@@ -234,6 +468,10 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
             )
     except TIMEOUT_EXCEPTIONS as exc:
         logger.warning("LLM timeout while streaming workflow: %s", exc)
+        PERSISTENCE.mark_session_paused(
+            session_id=session_id,
+            reason="LLM API timeout while executing the workflow.",
+        )
         yield to_sse_data(
             AgentStreamEvent(
                 agent_name="system",
@@ -241,8 +479,28 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                 content="LLM API timeout while executing the workflow.",
             )
         )
+    except asyncio.CancelledError:
+        PERSISTENCE.mark_session_paused(
+            session_id=session_id,
+            reason="Client disconnected before workflow completion.",
+        )
+        raise
+    except PersistenceError as exc:
+        logger.exception("Persistence error while streaming workflow.")
+        PERSISTENCE.mark_session_failed(session_id=session_id, error_message=str(exc))
+        yield to_sse_data(
+            AgentStreamEvent(
+                agent_name="system",
+                event_type="error",
+                content=f"Persistence error: {exc}",
+            )
+        )
     except Exception:
         logger.exception("Unexpected error while streaming workflow.")
+        PERSISTENCE.mark_session_failed(
+            session_id=session_id,
+            error_message="Unexpected server error while executing the workflow.",
+        )
         yield to_sse_data(
             AgentStreamEvent(
                 agent_name="system",
