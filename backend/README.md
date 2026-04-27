@@ -37,6 +37,46 @@ Set your LLM credentials (for OpenAI-backed `ChatOpenAI`) and run:
 python backend/run_example.py
 ```
 
+## Run API (SSE)
+
+Start FastAPI:
+
+```bash
+uvicorn api.main:app --app-dir backend --reload
+```
+
+Endpoint:
+
+- `POST /api/v1/agents/run`
+
+Request body:
+
+```json
+{
+  "prompt": "Design a resilient event-driven architecture for order processing.",
+  "model_name": "gpt-4o-mini",
+  "temperature": 0.1,
+  "timeout_seconds": 120
+}
+```
+
+SSE payload format (strict JSON):
+
+```json
+{
+  "agent_name": "researcher",
+  "event_type": "thought",
+  "content": "..."
+}
+```
+
+`event_type` values:
+
+- `thought`
+- `tool_execution`
+- `final_answer`
+- `error`
+
 ## Add a QA Tester later
 
 1. Add a `QA_TESTER` prompt/spec in `multi_agent/graph.py`.
