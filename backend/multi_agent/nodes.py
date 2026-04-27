@@ -53,7 +53,9 @@ def make_agent_node(spec: AgentSpec) -> AgentNode:
 
     def _node(state: ExecutionState) -> ExecutionUpdate:
         response = chain.invoke({"messages": state["messages"]})
-        content = _to_text(response.content if isinstance(response, BaseMessage) else response)
+        content = _to_text(
+            response.content if isinstance(response, BaseMessage) else response
+        )
 
         return {
             "messages": [AIMessage(content=content, name=spec.name.value)],

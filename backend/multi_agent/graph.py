@@ -58,7 +58,9 @@ def build_execution_graph(
     graph.add_edge(START, start_agent)
 
     router = build_router((spec.name for spec in agent_specs), progression=progression)
-    route_map: dict[RouteTarget, str] = {spec.name.value: spec.name.value for spec in agent_specs}
+    route_map: dict[RouteTarget, str] = {
+        spec.name.value: spec.name.value for spec in agent_specs
+    }
     route_map["FINISHED"] = END
 
     for spec in agent_specs:
@@ -74,7 +76,9 @@ def build_two_agent_graph(
     temperature: float = 0.1,
 ) -> CompiledStateGraph:
     """Build the default Researcher <-> Coder graph."""
-    shared_llm = llm or build_foundational_llm(model_name=model_name, temperature=temperature)
+    shared_llm = llm or build_foundational_llm(
+        model_name=model_name, temperature=temperature
+    )
 
     specs = (
         AgentSpec(

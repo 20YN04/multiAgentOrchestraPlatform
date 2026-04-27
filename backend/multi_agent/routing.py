@@ -8,7 +8,9 @@ from langchain_core.messages import AIMessage, BaseMessage
 
 from .state import ActiveAgent, AgentName, ExecutionState, RouteTarget
 
-DIRECTIVE_PATTERN = re.compile(r"^\s*NEXT\s*:\s*([A-Z_]+)\s*$", re.IGNORECASE | re.MULTILINE)
+DIRECTIVE_PATTERN = re.compile(
+    r"^\s*NEXT\s*:\s*([A-Z_]+)\s*$", re.IGNORECASE | re.MULTILINE
+)
 
 
 def _to_text(content: object) -> str:
