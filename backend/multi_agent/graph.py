@@ -74,10 +74,17 @@ def build_two_agent_graph(
     llm: BaseChatModel | None = None,
     model_name: str = "gpt-4o-mini",
     temperature: float = 0.1,
+    streaming: bool = False,
+    request_timeout_seconds: float | None = None,
+    max_retries: int = 2,
 ) -> CompiledStateGraph:
     """Build the default Researcher <-> Coder graph."""
     shared_llm = llm or build_foundational_llm(
-        model_name=model_name, temperature=temperature
+        model_name=model_name,
+        temperature=temperature,
+        streaming=streaming,
+        request_timeout_seconds=request_timeout_seconds,
+        max_retries=max_retries,
     )
 
     specs = (
