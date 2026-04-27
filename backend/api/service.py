@@ -138,9 +138,7 @@ def _extract_agent_output_candidate(
     if isinstance(output, Mapping):
         messages = output.get("messages")
         if isinstance(messages, list) and messages:
-            candidate = _strip_routing_directive(
-                _extract_message_content(messages[-1])
-            )
+            candidate = _strip_routing_directive(_extract_message_content(messages[-1]))
             if candidate:
                 return (agent_name, candidate)
 
