@@ -19,22 +19,44 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'session_status') THEN
+                CREATE TYPE session_status AS ENUM ('running', 'paused', 'completed', 'failed');
+            END IF;
+        END
+        $$;
+        """
+    )
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tool_execution_status') THEN
+                CREATE TYPE tool_execution_status AS ENUM ('started', 'completed', 'failed');
+            END IF;
+        END
+        $$;
+        """
+    )
+
     session_status = sa.Enum(
         "running",
         "paused",
         "completed",
         "failed",
         name="session_status",
+        create_type=False,
     )
     tool_execution_status = sa.Enum(
         "started",
         "completed",
         "failed",
         name="tool_execution_status",
+        create_type=False,
     )
-
-    session_status.create(op.get_bind(), checkfirst=True)
-    tool_execution_status.create(op.get_bind(), checkfirst=True)
 
     op.create_table(
         "sessions",
@@ -149,18 +171,5 @@ def downgrade() -> None:
 
     op.drop_table("sessions")
 
-    tool_execution_status = sa.Enum(
-        "started",
-        "completed",
-        "failed",
-        name="tool_execution_status",
-    )
-    session_status = sa.Enum(
-        "running",
-        "paused",
-        "completed",
-        "failed",
-        name="session_status",
-    )
-    tool_execution_status.drop(op.get_bind(), checkfirst=True)
-    session_status.drop(op.get_bind(), checkfirst=True)
+    op.execute("DROP TYPE IF EXISTS tool_execution_status;")
+    op.execute("DROP TYPE IF EXISTS session_status;")

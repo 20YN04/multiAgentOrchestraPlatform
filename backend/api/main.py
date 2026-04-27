@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import StreamingResponse
 
 from init_db import initialize_database
@@ -29,7 +29,10 @@ def run_database_migrations() -> None:
 
 
 @router.post("/run", response_class=StreamingResponse)
-async def run_agents(request: AgentRunRequest) -> StreamingResponse:
+async def run_agents(
+    request: AgentRunRequest,
+    http_request: Request,
+) -> StreamingResponse:
     """
     Start the LangGraph multi-agent workflow and stream SSE JSON events.
     """
@@ -39,7 +42,7 @@ async def run_agents(request: AgentRunRequest) -> StreamingResponse:
         "X-Accel-Buffering": "no",
     }
     return StreamingResponse(
-        stream_agent_run(request),
+        stream_agent_run(request, client_request=http_request),
         media_type="text/event-stream",
         headers=headers,
     )

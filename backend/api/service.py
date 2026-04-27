@@ -5,6 +5,7 @@ import logging
 import re
 import uuid
 from collections.abc import AsyncIterator, Mapping
+from contextlib import suppress
 from functools import lru_cache
 from typing import Any, Final, cast
 
@@ -25,9 +26,19 @@ from .models import AgentRunRequest, AgentStreamEvent
 from .sse import to_sse_data
 
 try:
-    from openai import APITimeoutError  # type: ignore
+    from openai import (  # type: ignore
+        APIConnectionError,
+        APIError,
+        APITimeoutError,
+        InternalServerError,
+        RateLimitError,
+    )
 except Exception:  # pragma: no cover - best-effort import
+    APIConnectionError = None  # type: ignore[assignment]
+    APIError = None  # type: ignore[assignment]
     APITimeoutError = None  # type: ignore[assignment]
+    InternalServerError = None  # type: ignore[assignment]
+    RateLimitError = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +64,21 @@ TIMEOUT_EXCEPTIONS: tuple[type[BaseException], ...] = (
 )
 if APITimeoutError is not None:
     TIMEOUT_EXCEPTIONS = TIMEOUT_EXCEPTIONS + (APITimeoutError,)
+
+LLM_PROVIDER_EXCEPTIONS: tuple[type[BaseException], ...] = tuple(
+    exc
+    for exc in (
+        APIConnectionError,
+        APIError,
+        InternalServerError,
+        RateLimitError,
+    )
+    if exc is not None
+)
+
+
+class ClientDisconnectError(RuntimeError):
+    """Raised when the SSE client disconnects mid-stream."""
 
 
 @lru_cache(maxsize=8)
@@ -290,7 +316,21 @@ def _tool_event_content(event: Mapping[str, Any]) -> str:
     return f"{tool_name} emitted {event_name}."
 
 
-async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
+def _format_provider_error(exc: BaseException) -> str:
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+    detail = getattr(exc, "message", None) or str(exc)
+    if status_code:
+        return f"LLM provider error (HTTP {status_code}): {detail}"
+    return f"LLM provider error: {detail}"
+
+
+async def stream_agent_run(
+    request: AgentRunRequest,
+    client_request: Any | None = None,
+) -> AsyncIterator[str]:
     """
     Stream LangGraph execution as strict JSON SSE frames.
 
@@ -344,107 +384,134 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
         )
     )
 
-    try:
+    event_queue: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue()
+
+    async def _produce_events() -> None:
         async with asyncio.timeout(request.timeout_seconds):
             async for event in graph.astream_events(runtime_state, version="v2"):
-                event_name = str(event.get("event", ""))
+                await event_queue.put(event)
 
-                if event_name == "on_chat_model_stream":
-                    token = _extract_streamed_token(event)
-                    if token:
-                        yield to_sse_data(
-                            AgentStreamEvent(
-                                agent_name=_resolve_agent_name(event),
-                                event_type="thought",
-                                content=token,
-                            )
-                        )
-                    continue
+    producer_task = asyncio.create_task(_produce_events())
 
-                if event_name == "on_tool_start":
-                    run_id = _extract_run_id(event)
-                    data = event.get("data")
-                    input_payload = (
-                        {"input": _to_json_safe(data.get("input"))}
-                        if isinstance(data, Mapping)
-                        else None
+    try:
+        while True:
+            if client_request is not None:
+                is_disconnected = await client_request.is_disconnected()
+                if is_disconnected:
+                    raise ClientDisconnectError(
+                        "Client disconnected during SSE streaming."
                     )
 
-                    PERSISTENCE.record_tool_start(
-                        session_id=session_id,
-                        run_id=run_id,
-                        turn_index=turn_index,
+            try:
+                event = await asyncio.wait_for(event_queue.get(), timeout=0.2)
+            except asyncio.TimeoutError:
+                if producer_task.done():
+                    break
+                continue
+
+            event_name = str(event.get("event", ""))
+
+            if event_name == "on_chat_model_stream":
+                token = _extract_streamed_token(event)
+                if token:
+                    yield to_sse_data(
+                        AgentStreamEvent(
+                            agent_name=_resolve_agent_name(event),
+                            event_type="thought",
+                            content=token,
+                        )
+                    )
+                continue
+
+            if event_name == "on_tool_start":
+                run_id = _extract_run_id(event)
+                data = event.get("data")
+                input_payload = (
+                    {"input": _to_json_safe(data.get("input"))}
+                    if isinstance(data, Mapping)
+                    else None
+                )
+
+                PERSISTENCE.record_tool_start(
+                    session_id=session_id,
+                    run_id=run_id,
+                    turn_index=turn_index,
+                    agent_name=_resolve_agent_name(event),
+                    tool_name=str(event.get("name", "tool")),
+                    input_payload=cast(dict[str, Any] | None, input_payload),
+                )
+
+                yield to_sse_data(
+                    AgentStreamEvent(
                         agent_name=_resolve_agent_name(event),
-                        tool_name=str(event.get("name", "tool")),
-                        input_payload=cast(dict[str, Any] | None, input_payload),
+                        event_type="tool_execution",
+                        content=_tool_event_content(event),
                     )
+                )
+                continue
 
-                    yield to_sse_data(
-                        AgentStreamEvent(
-                            agent_name=_resolve_agent_name(event),
-                            event_type="tool_execution",
-                            content=_tool_event_content(event),
-                        )
+            if event_name == "on_tool_end":
+                run_id = _extract_run_id(event)
+                data = event.get("data")
+                output_payload = (
+                    {"output": _to_json_safe(data.get("output"))}
+                    if isinstance(data, Mapping)
+                    else None
+                )
+
+                PERSISTENCE.record_tool_end(
+                    session_id=session_id,
+                    run_id=run_id,
+                    output_payload=cast(dict[str, Any] | None, output_payload),
+                    error_message=None,
+                )
+
+                yield to_sse_data(
+                    AgentStreamEvent(
+                        agent_name=_resolve_agent_name(event),
+                        event_type="tool_execution",
+                        content=_tool_event_content(event),
                     )
-                    continue
+                )
+                continue
 
-                if event_name == "on_tool_end":
-                    run_id = _extract_run_id(event)
-                    data = event.get("data")
-                    output_payload = (
-                        {"output": _to_json_safe(data.get("output"))}
-                        if isinstance(data, Mapping)
-                        else None
-                    )
-
-                    PERSISTENCE.record_tool_end(
-                        session_id=session_id,
-                        run_id=run_id,
-                        output_payload=cast(dict[str, Any] | None, output_payload),
-                        error_message=None,
-                    )
-
-                    yield to_sse_data(
-                        AgentStreamEvent(
-                            agent_name=_resolve_agent_name(event),
-                            event_type="tool_execution",
-                            content=_tool_event_content(event),
-                        )
-                    )
-                    continue
-
-                if event_name == "on_chain_end":
-                    update_candidate = _extract_agent_output_update(event)
-                    if update_candidate is not None:
-                        agent_name, output_update = update_candidate
-                        runtime_state, next_agent, output_content = (
-                            _apply_node_output_to_state(
-                                runtime_state,
-                                agent_name=agent_name,
-                                output_update=output_update,
-                            )
-                        )
-
-                        persisted_output = output_content or _strip_routing_directive(
-                            _to_text(output_update)
-                        )
-                        PERSISTENCE.save_turn_checkpoint(
-                            session_id=session_id,
-                            turn_index=turn_index,
+            if event_name == "on_chain_end":
+                update_candidate = _extract_agent_output_update(event)
+                if update_candidate is not None:
+                    agent_name, output_update = update_candidate
+                    runtime_state, next_agent, output_content = (
+                        _apply_node_output_to_state(
+                            runtime_state,
                             agent_name=agent_name,
-                            output_content=persisted_output,
-                            next_agent=next_agent,
-                            state=runtime_state,
+                            output_update=output_update,
                         )
+                    )
 
-                        if persisted_output:
-                            final_answer = (agent_name, persisted_output)
-                        turn_index += 1
-                        continue
+                    persisted_output = output_content or _strip_routing_directive(
+                        _to_text(output_update)
+                    )
+                    PERSISTENCE.save_turn_checkpoint(
+                        session_id=session_id,
+                        turn_index=turn_index,
+                        agent_name=agent_name,
+                        output_content=persisted_output,
+                        next_agent=next_agent,
+                        state=runtime_state,
+                    )
 
-                    candidate = _extract_agent_output_candidate(event)
-                    if candidate is not None:
-                        final_answer = candidate
+                    if persisted_output:
+                        final_answer = (agent_name, persisted_output)
+                    turn_index += 1
+                    continue
+
+                candidate = _extract_agent_output_candidate(event)
+                if candidate is not None:
+                    final_answer = candidate
+
+        if producer_task.done():
+            producer_error = producer_task.exception()
+            if producer_error is not None:
+                raise producer_error
 
         PERSISTENCE.mark_session_completed(
             session_id=session_id, final_state=runtime_state
@@ -466,6 +533,12 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                     content="Workflow completed.",
                 )
             )
+    except ClientDisconnectError:
+        PERSISTENCE.mark_session_paused(
+            session_id=session_id,
+            reason="Client disconnected before workflow completion.",
+        )
+        return
     except TIMEOUT_EXCEPTIONS as exc:
         logger.warning("LLM timeout while streaming workflow: %s", exc)
         PERSISTENCE.mark_session_paused(
@@ -479,12 +552,20 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                 content="LLM API timeout while executing the workflow.",
             )
         )
-    except asyncio.CancelledError:
+    except LLM_PROVIDER_EXCEPTIONS as exc:
+        logger.warning("LLM provider error while streaming workflow: %s", exc)
+        error_message = _format_provider_error(exc)
         PERSISTENCE.mark_session_paused(
             session_id=session_id,
-            reason="Client disconnected before workflow completion.",
+            reason=error_message,
         )
-        raise
+        yield to_sse_data(
+            AgentStreamEvent(
+                agent_name="system",
+                event_type="error",
+                content=error_message,
+            )
+        )
     except PersistenceError as exc:
         logger.exception("Persistence error while streaming workflow.")
         PERSISTENCE.mark_session_failed(session_id=session_id, error_message=str(exc))
@@ -508,3 +589,8 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                 content="Unexpected server error while executing the workflow.",
             )
         )
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await producer_task
