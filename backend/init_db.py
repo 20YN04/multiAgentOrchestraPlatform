@@ -27,7 +27,9 @@ def _read_int_env(name: str, default: int) -> int:
     try:
         return int(value)
     except ValueError:
-        logger.warning("Invalid integer for %s=%s; using default=%s", name, value, default)
+        logger.warning(
+            "Invalid integer for %s=%s; using default=%s", name, value, default
+        )
         return default
 
 
@@ -38,7 +40,9 @@ def _read_float_env(name: str, default: float) -> float:
     try:
         return float(value)
     except ValueError:
-        logger.warning("Invalid float for %s=%s; using default=%s", name, value, default)
+        logger.warning(
+            "Invalid float for %s=%s; using default=%s", name, value, default
+        )
         return default
 
 

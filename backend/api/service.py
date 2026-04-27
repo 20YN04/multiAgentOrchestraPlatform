@@ -8,7 +8,12 @@ from collections.abc import AsyncIterator, Mapping
 from functools import lru_cache
 from typing import Any, Final, cast
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, messages_from_dict
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    messages_from_dict,
+)
 from langgraph.graph.state import CompiledStateGraph
 
 from db.checkpointing import ConversationPersistence, PersistenceError
@@ -299,7 +304,9 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
 
     prompt = request.prompt.strip() if isinstance(request.prompt, str) else ""
     initial_state = _build_initial_state(prompt)
-    requested_session_id = str(request.session_id) if request.session_id is not None else None
+    requested_session_id = (
+        str(request.session_id) if request.session_id is not None else None
+    )
 
     try:
         bootstrap = PERSISTENCE.bootstrap_session(
@@ -357,9 +364,11 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                 if event_name == "on_tool_start":
                     run_id = _extract_run_id(event)
                     data = event.get("data")
-                    input_payload = {
-                        "input": _to_json_safe(data.get("input"))
-                    } if isinstance(data, Mapping) else None
+                    input_payload = (
+                        {"input": _to_json_safe(data.get("input"))}
+                        if isinstance(data, Mapping)
+                        else None
+                    )
 
                     PERSISTENCE.record_tool_start(
                         session_id=session_id,
@@ -382,9 +391,11 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                 if event_name == "on_tool_end":
                     run_id = _extract_run_id(event)
                     data = event.get("data")
-                    output_payload = {
-                        "output": _to_json_safe(data.get("output"))
-                    } if isinstance(data, Mapping) else None
+                    output_payload = (
+                        {"output": _to_json_safe(data.get("output"))}
+                        if isinstance(data, Mapping)
+                        else None
+                    )
 
                     PERSISTENCE.record_tool_end(
                         session_id=session_id,
@@ -406,10 +417,12 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                     update_candidate = _extract_agent_output_update(event)
                     if update_candidate is not None:
                         agent_name, output_update = update_candidate
-                        runtime_state, next_agent, output_content = _apply_node_output_to_state(
-                            runtime_state,
-                            agent_name=agent_name,
-                            output_update=output_update,
+                        runtime_state, next_agent, output_content = (
+                            _apply_node_output_to_state(
+                                runtime_state,
+                                agent_name=agent_name,
+                                output_update=output_update,
+                            )
                         )
 
                         persisted_output = output_content or _strip_routing_directive(
@@ -433,7 +446,9 @@ async def stream_agent_run(request: AgentRunRequest) -> AsyncIterator[str]:
                     if candidate is not None:
                         final_answer = candidate
 
-        PERSISTENCE.mark_session_completed(session_id=session_id, final_state=runtime_state)
+        PERSISTENCE.mark_session_completed(
+            session_id=session_id, final_state=runtime_state
+        )
 
         if final_answer is not None:
             yield to_sse_data(

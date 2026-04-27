@@ -96,7 +96,9 @@ class ConversationPersistence:
                     resumed=True,
                 )
 
-        session_id = _as_uuid(requested_session_id) if requested_session_id else uuid.uuid4()
+        session_id = (
+            _as_uuid(requested_session_id) if requested_session_id else uuid.uuid4()
+        )
 
         with session_scope() as db:
             existing = db.get(SessionRecord, session_id)
@@ -183,7 +185,9 @@ class ConversationPersistence:
 
             return turn.id
 
-    def mark_session_completed(self, *, session_id: str, final_state: ExecutionState) -> None:
+    def mark_session_completed(
+        self, *, session_id: str, final_state: ExecutionState
+    ) -> None:
         session_uuid = _as_uuid(session_id)
         with session_scope() as db:
             record = _get_session_for_update(db, session_uuid)
@@ -195,7 +199,9 @@ class ConversationPersistence:
             record.updated_at = datetime.now(timezone.utc)
             record.last_error = None
 
-    def mark_session_paused(self, *, session_id: str, reason: str | None = None) -> None:
+    def mark_session_paused(
+        self, *, session_id: str, reason: str | None = None
+    ) -> None:
         session_uuid = _as_uuid(session_id)
         with session_scope() as db:
             record = _get_session_for_update(db, session_uuid)
