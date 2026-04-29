@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, useMemo, useState } from "react";
 
 import type { AgentEventType, AgentTurnEvent } from "../../lib/agent-stream-types";
 import { useAgentStream } from "../../hooks/useAgentStream";
@@ -99,7 +99,9 @@ export function AgentStreamTerminal(): JSX.Element {
           <textarea
             id="agent-prompt"
             value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+              setPrompt(event.target.value)
+            }
             rows={4}
             className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 outline-none transition focus:border-teal-400 focus:ring-2 focus:ring-teal-500/30"
             placeholder="Describe what the multi-agent system should do..."
