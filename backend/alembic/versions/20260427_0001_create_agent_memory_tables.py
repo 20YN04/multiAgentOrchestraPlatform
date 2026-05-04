@@ -42,7 +42,7 @@ def upgrade() -> None:
         """
     )
 
-    session_status = sa.Enum(
+    session_status = postgresql.ENUM(
         "running",
         "paused",
         "completed",
@@ -50,7 +50,7 @@ def upgrade() -> None:
         name="session_status",
         create_type=False,
     )
-    tool_execution_status = sa.Enum(
+    tool_execution_status = postgresql.ENUM(
         "started",
         "completed",
         "failed",
