@@ -19,8 +19,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        """
+    op.execute("""
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'session_status') THEN
@@ -28,10 +27,8 @@ def upgrade() -> None:
             END IF;
         END
         $$;
-        """
-    )
-    op.execute(
-        """
+        """)
+    op.execute("""
         DO $$
         BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'tool_execution_status') THEN
@@ -39,8 +36,7 @@ def upgrade() -> None:
             END IF;
         END
         $$;
-        """
-    )
+        """)
 
     session_status = postgresql.ENUM(
         "running",
