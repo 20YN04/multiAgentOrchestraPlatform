@@ -20,10 +20,11 @@ This folder contains a ready-to-use streaming UI for the multi-agent backend.
 
 ## Environment
 
-Set backend base URL in your Next.js app:
+Set backend base URL in your Next.js app (server-only — not exposed to the browser):
 
 ```bash
-NEXT_PUBLIC_AGENT_API_BASE_URL=http://127.0.0.1:8000
+AGENT_API_BASE_URL=http://127.0.0.1:8000
+API_KEY=<shared secret matching the backend API_KEY env var>
 ```
 
 ## Event contract expected from backend

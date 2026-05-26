@@ -48,14 +48,17 @@ export async function GET(request: NextRequest): Promise<Response> {
   const temperature = toFiniteNumber(search.get("temperature"), 0.1);
   const timeoutSeconds = toFiniteNumber(search.get("timeout_seconds"), 120);
 
-  const backendBaseUrl = process.env.NEXT_PUBLIC_AGENT_API_BASE_URL ?? "http://127.0.0.1:8000";
+  const backendBaseUrl = process.env.AGENT_API_BASE_URL ?? "http://127.0.0.1:8000";
   const backendUrl = `${backendBaseUrl.replace(/\/$/, "")}/api/v1/agents/run`;
+
+  const apiKey = process.env.API_KEY ?? "";
 
   const upstreamResponse = await fetch(backendUrl, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
+      "X-API-Key": apiKey,
     },
     body: JSON.stringify({
       prompt,
