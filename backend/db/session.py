@@ -9,11 +9,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
-DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@db:5432/multi_agent"
-
-
 def get_database_url() -> str:
-    return os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise ValueError("DATABASE_URL env var is required but not set")
+    return url
 
 
 @lru_cache(maxsize=1)

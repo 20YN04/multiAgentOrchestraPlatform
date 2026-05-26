@@ -7,10 +7,18 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 EventType = Literal["thought", "tool_execution", "final_answer", "error"]
 
+# Allowlist: only models we actually wire up via langchain-openai / ChatOpenAI.
+AllowedModel = Literal[
+    "gpt-4o",
+    "gpt-4o-mini",
+    "gpt-4-turbo",
+    "gpt-3.5-turbo",
+]
+
 
 class AgentRunRequest(BaseModel):
     prompt: str | None = Field(default=None, max_length=20000)
-    model_name: str = Field(default="gpt-4o-mini", min_length=1)
+    model_name: AllowedModel = Field(default="gpt-4o-mini")
     temperature: float = Field(default=0.1, ge=0.0, le=1.0)
     timeout_seconds: float = Field(default=120.0, gt=1.0, le=600.0)
     session_id: UUID | None = None
